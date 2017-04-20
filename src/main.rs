@@ -30,7 +30,7 @@ struct Tile {
     /// 4 bits for the colour
     /// 12 bits for the timestamp (delta)
     /// [colour, 31..28][next, 27..17][timestamp, 16..0]
-    changes: [GfxChange; MAX_CHANGES],
+    changes: [u32; MAX_CHANGES],
 }
 
 pub struct Change(u32);
@@ -73,14 +73,14 @@ impl Tile {
             y: y,
             timestamp: ts,
             tail: 256,
-            changes: [GfxChange { change: 0 }; MAX_CHANGES],
+            changes: [0; MAX_CHANGES],
         }
     }
 
     fn newest_timestamp(&self) -> u32 {
         let mut ts = 0;
-        for change in &self.changes[..] {
-            let next = Change(change.change).timestamp();
+        for &change in &self.changes[..] {
+            let next = Change(change).timestamp();
             ts = std::cmp::max(ts, next);
         }
         ts + self.timestamp
@@ -90,7 +90,7 @@ impl Tile {
         let mut new = Tile::new(src.x, src.y, src.newest_timestamp());
         for i in 0..256 {
             let (last, _) = src.seek_end(i);
-            new.changes[i].change = Change(src.changes[last].change)
+            new.changes[i] = Change(src.changes[last])
                 .set_timestamp(0)
                 .set_next(0).0;
         }
@@ -101,7 +101,7 @@ impl Tile {
     fn seek_end(&self, mut link: usize) -> (usize, usize) {
         let mut len = 1;
         loop {
-            let change = Change(self.changes[link].change);
+            let change = Change(self.changes[link]);
             let next = change.next();
             if next == 0 {
                 break;
@@ -128,14 +128,14 @@ impl Tile {
             return false;
         }
 
-        let change = Change(self.changes[index].change);
+        let change = Change(self.changes[index]);
         let tail = self.tail;
         self.tail += 1;
 
         // set the index of the next pointer
-        self.changes[index].change = change.set_next(tail).0;
+        self.changes[index] = change.set_next(tail).0;
         // set the new cell with the correct values
-        self.changes[tail].change = Change::new()
+        self.changes[tail] = Change::new()
             .set_timestamp(ts - self.timestamp)
             .set_colour(colour)
             .0;
@@ -200,13 +200,7 @@ pub static VERTEX_SHADER_SRC: &'static [u8] = b"
 pub static FRAGMENT_SHADER_SRC: &'static [u8] = b"
     #version 150 core
 
-    struct Change {
-        uint change;
-    };
-
-    uniform b_Changes {
-        Change change[2048];
-    };
+    uniform usampler1D t_Changes;
 
     struct Pallet {
         vec4 colour;
@@ -232,7 +226,7 @@ pub static FRAGMENT_SHADER_SRC: &'static [u8] = b"
 
         // avoid looping forever if something fucks up
         for (int i = 0; i <= 16; i++) {
-            uint c = change[idx].change;
+            uint c = texelFetch(t_Changes, int(idx), 0).x;
             uint next = (c >> uint(17)) & uint(0x7FF);
             int ts = int(c) & 0x1FFFF;
 
@@ -269,7 +263,7 @@ gfx_defines!{
 
     pipeline pipe {
         vbuf: gfx::VertexBuffer<Vertex> = (),
-        tile: gfx::ConstantBuffer<GfxChange> = "b_Changes",
+        tile: gfx::TextureSampler<u32> = "t_Changes",
         pallet: gfx::ConstantBuffer<Pallet> = "b_Pallet",
 
         //proj: gfx::Global<[[f32; 4]; 4]> = "u_Proj",
@@ -354,7 +348,7 @@ fn main() {
     let builder = glutin::WindowBuilder::new()
         .with_gl(gl_version)
         .with_title("/r/place viewer".to_string())
-        .with_dimensions(1024, 1024);
+        .with_dimensions(800, 800);
 
     let (window, mut device, mut factory, rtv, stv) =
         gfx_window_glutin::init::<Rgba8, DepthStencil>(builder);
@@ -363,6 +357,11 @@ fn main() {
     let mesh = factory.create_vertex_buffer(&mesh);
     let combuf = factory.create_command_buffer();
     let mut encoder: gfx::Encoder<gfx_device_gl::Resources, _> = combuf.into();
+
+    let sinfo = gfx::texture::SamplerInfo::new(
+        gfx::texture::FilterMethod::Scale,
+        gfx::texture::WrapMode::Clamp);
+    let sampler = factory.create_sampler(sinfo);
 
     let pso = factory.create_pipeline_simple(VERTEX_SHADER_SRC, FRAGMENT_SHADER_SRC, pipe::new())
         .expect("Could not create PSO for `DrawShaded`!");
@@ -390,7 +389,9 @@ fn main() {
     for ((x, y), tiles) in tiles {
         let mut buffers = Vec::new();
         for tile in tiles {
-            let buffer = factory.create_buffer_immutable(&tile.changes, gfx::buffer::Role::Constant, gfx::Bind::empty()).unwrap();
+            let kind = gfx::texture::Kind::D1(2048);
+            let data = [&tile.changes[..]; 1];
+            let (_, buffer) = factory.create_texture_immutable::<(gfx::format::R32, gfx::format::Uint)>(kind, &data[..]).unwrap();
             buffers.push((tile.timestamp, buffer));
         }
         gpu_tiles_buffers.insert((x, y), buffers);
@@ -429,7 +430,7 @@ fn main() {
 
             let data = pipe::Data {
                 vbuf: mesh.clone(),
-                tile: tile[idx].1.clone(),
+                tile: (tile[idx].1.clone(), sampler.clone()),
                 pallet: pallet.clone(),
                 time: delta,
                 out_colour: rtv.clone(),
