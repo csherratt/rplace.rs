@@ -1,3 +1,4 @@
+extern crate cgmath;
 extern crate clap;
 extern crate csv;
 extern crate glutin;
@@ -9,6 +10,7 @@ extern crate gfx_window_glutin;
 
 use std::collections::HashMap;
 
+use cgmath::SquareMatrix;
 use clap::{Arg, App};
 use gfx::traits::{Device, Factory, FactoryExt};
 use gfx_core::format::{DepthStencil, Rgba8};
@@ -92,7 +94,8 @@ impl Tile {
             let (last, _) = src.seek_end(i);
             new.changes[i] = Change(src.changes[last])
                 .set_timestamp(0)
-                .set_next(0).0;
+                .set_next(0)
+                .0;
         }
         new
     }
@@ -181,8 +184,8 @@ fn read_csv(path: &str) -> HashMap<(u16, u16), Vec<Tile>> {
 pub static VERTEX_SHADER_SRC: &'static [u8] = b"
     #version 150 core
 
-    //uniform mat4 u_Proj;
-    //uniform mat4 u_View;
+    uniform mat4 u_Proj;
+    uniform mat4 u_View;
 
     in vec2 a_Pos;
     in uvec2 a_Coord;
@@ -193,7 +196,7 @@ pub static VERTEX_SHADER_SRC: &'static [u8] = b"
 
     void main() {
         v_Out.Coord = vec2(a_Coord);
-        gl_Position = /*u_Proj * u_View  */ vec4(a_Pos, 0., 1.);
+        gl_Position = u_Proj * u_View * vec4(a_Pos, 0., 1.);
     }
 ";
 
@@ -225,7 +228,7 @@ pub static FRAGMENT_SHADER_SRC: &'static [u8] = b"
         uint idx = y * uint(16) + x;
 
         // avoid looping forever if something fucks up
-        for (int i = 0; i <= 16; i++) {
+        while (true) {
             uint c = texelFetch(t_Changes, int(idx), 0).x;
             uint next = (c >> uint(17)) & uint(0x7FF);
             int ts = int(c) & 0x1FFFF;
@@ -266,8 +269,8 @@ gfx_defines!{
         tile: gfx::TextureSampler<u32> = "t_Changes",
         pallet: gfx::ConstantBuffer<Pallet> = "b_Pallet",
 
-        //proj: gfx::Global<[[f32; 4]; 4]> = "u_Proj",
-        //view: gfx::Global<[[f32; 4]; 4]> = "u_View",
+        proj: gfx::Global<[[f32; 4]; 4]> = "u_Proj",
+        view: gfx::Global<[[f32; 4]; 4]> = "u_View",
         time: gfx::Global<i32> = "u_Timestamp",
 
         out_colour: gfx::RenderTarget<Rgba8> = "o_Colour",
@@ -284,25 +287,25 @@ fn mesh_offset(x: u16, y: u16) -> u32 {
 
 // create the mesh
 fn build_mesh() -> Vec<Vertex> {
-    let scale = |pt: u32| -> f32 { ((pt as f32) - 32.) / 32. };
+    let scale = |pt: u32| -> f32 { pt as f32 * 16. };
 
     let mut mesh = Vec::new();
     for y in 0..(1024 / 16) {
         for x in 0..(1024 / 16) {
             let pt0 = Vertex {
-                pos: [scale(x), -scale(y)],
+                pos: [scale(x), scale(y)],
                 coord: [0, 0],
             };
             let pt1 = Vertex {
-                pos: [scale(x), -scale(y + 1)],
+                pos: [scale(x), scale(y + 1)],
                 coord: [16, 0],
             };
             let pt2 = Vertex {
-                pos: [scale(x + 1), -scale(y + 1)],
+                pos: [scale(x + 1), scale(y + 1)],
                 coord: [16, 16],
             };
             let pt3 = Vertex {
-                pos: [scale(x + 1), -scale(y)],
+                pos: [scale(x + 1), scale(y)],
                 coord: [0, 16],
             };
 
@@ -320,12 +323,20 @@ fn build_mesh() -> Vec<Vertex> {
     mesh
 }
 
+fn srgb_to_linear(src: f32) -> f32 {
+    if src < 0.03928 {
+        src / 12.92
+    } else {
+        ((src+0.055) / 1.055).powf(2.4)
+    }
+}
+
 fn decode_pallet(colour: u32) -> Pallet {
     Pallet {
-        colour: [(((colour >> 16) & 0xFF) as f32 / 255.),
-                 (((colour >> 8) & 0xFF) as f32 / 255.),
-                 (((colour >> 0) & 0xFF) as f32 / 255.),
-                 1.],
+        colour: [srgb_to_linear(((colour >> 16) & 0xFF) as f32 / 255.),
+                 srgb_to_linear(((colour >> 8) & 0xFF) as f32 / 255.),
+                 srgb_to_linear(((colour >> 0) & 0xFF) as f32 / 255.),
+                 0.],
     }
 }
 
@@ -348,7 +359,8 @@ fn main() {
     let builder = glutin::WindowBuilder::new()
         .with_gl(gl_version)
         .with_title("/r/place viewer".to_string())
-        .with_dimensions(800, 800);
+        .with_pixel_format(16,0)
+        .with_dimensions(1024, 1024);
 
     let (window, mut device, mut factory, rtv, stv) =
         gfx_window_glutin::init::<Rgba8, DepthStencil>(builder);
@@ -358,9 +370,8 @@ fn main() {
     let combuf = factory.create_command_buffer();
     let mut encoder: gfx::Encoder<gfx_device_gl::Resources, _> = combuf.into();
 
-    let sinfo = gfx::texture::SamplerInfo::new(
-        gfx::texture::FilterMethod::Scale,
-        gfx::texture::WrapMode::Clamp);
+    let sinfo = gfx::texture::SamplerInfo::new(gfx::texture::FilterMethod::Scale,
+                                               gfx::texture::WrapMode::Clamp);
     let sampler = factory.create_sampler(sinfo);
 
     let pso = factory.create_pipeline_simple(VERTEX_SHADER_SRC, FRAGMENT_SHADER_SRC, pipe::new())
@@ -381,7 +392,10 @@ fn main() {
                            decode_pallet(0x0000EA),
                            decode_pallet(0xCF6EE4),
                            decode_pallet(0x820080)];
-    let pallet = factory.create_buffer_immutable(&pallet_data, gfx::buffer::Role::Constant, gfx::Bind::empty()).unwrap();
+    let pallet = factory.create_buffer_immutable(&pallet_data,
+                                 gfx::buffer::Role::Constant,
+                                 gfx::Bind::empty())
+        .unwrap();
 
     println!("Loading to GPU memory");
     let mut gpu_tiles_buffers = HashMap::new();
@@ -391,16 +405,30 @@ fn main() {
         for tile in tiles {
             let kind = gfx::texture::Kind::D1(2048);
             let data = [&tile.changes[..]; 1];
-            let (_, buffer) = factory.create_texture_immutable::<(gfx::format::R32, gfx::format::Uint)>(kind, &data[..]).unwrap();
+            let (_, buffer) =
+                factory.create_texture_immutable::<(gfx::format::R32, gfx::format::Uint)>(kind,
+                                                                                       &data[..])
+                    .unwrap();
             buffers.push((tile.timestamp, buffer));
         }
         gpu_tiles_buffers.insert((x, y), buffers);
     }
 
     println!("ready");
-    let mut ts = 1490931573;
+    let mut ts = 1491000000;
+
+    let proj = cgmath::Ortho {
+        left: 0.,
+        right: 1000.,
+        top: 0.,
+        bottom: 1000.,
+        near: -1.,
+        far: 1.,
+    };
+    let view = cgmath::Matrix4::identity();
+
     loop {
-        encoder.clear(&rtv, [1., 1., 1., 0.]);
+        encoder.clear(&rtv, [0.5, 0.5, 0.5, 0.]);
         encoder.clear_depth(&stv, 1.);
 
         // draw all the tiles
@@ -413,7 +441,11 @@ fn main() {
                 idx = Some(i);
             }
 
-            let idx = if let Some(idx) = idx { idx } else { continue; };
+            let idx = if let Some(idx) = idx {
+                idx
+            } else {
+                continue;
+            };
 
             let off = mesh_offset(x / 16, y / 16);
             let slice = gfx::Slice {
@@ -429,6 +461,8 @@ fn main() {
             }
 
             let data = pipe::Data {
+                proj: cgmath::Matrix4::from(proj).into(),
+                view: view.into(),
                 vbuf: mesh.clone(),
                 tile: (tile[idx].1.clone(), sampler.clone()),
                 pallet: pallet.clone(),
@@ -449,6 +483,6 @@ fn main() {
         // only draw on events
         for _ in window.poll_events() {}
 
-        ts += 60;
+        ts += 5;
     }
 }

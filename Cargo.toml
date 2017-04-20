@@ -4,10 +4,11 @@ version = "0.1.0"
 authors = ["Talyxian <me@talyxian.space>"]
 
 [dependencies]
-clap="*"
+clap="2.23"
 glutin="0.7"
 gfx="0.14"
 gfx_core="0.6"
 gfx_device_gl="0.13"
 gfx_window_glutin="0.14"
-csv="*"
+csv="0.15"
+cgmath="0.13"
